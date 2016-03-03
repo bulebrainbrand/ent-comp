@@ -1,0 +1,30 @@
+{
+  "name": "@bulebrainbrand/ent-comp",
+  "version": "0.1.0",
+  "description": "A light, fast Entity Component System in JS",
+  "main": "src/ECS.js",
+  "files": [
+    "./dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest --run",
+    "dev": "vitest --watch"
+  },
+  "keywords": [
+    "ECS",
+    "js",
+    "typescript",
+    "Entity",
+    "Control",
+    "System"
+  ],
+  "author": "bulebrainbrand",
+  "license": "MIT",
+  "repository": "github:bulebrainbrand/ent-comp",
+  "devDependencies": {
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.7"
+  },
+  "private": false
+}
