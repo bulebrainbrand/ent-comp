@@ -1,12 +1,96 @@
-export default ECS;
-import DataStore from "./dataStore";
+import DataStore from "./dataStore.js";
 
-/*!
- * ent-comp: a light, *fast* Entity Component System in JS
- * @url      github.com/fenomas/ent-comp
- * @author   Andy Hall <andy@fenomas.com>
- * @license  MIT
- */
+export type EntityId = string | number;
+export type ComponentName = string;
+export type StateWithId<T> = T & { __id: EntityId };
+export interface StateConstructor<T extends Record<string, unknown>> {
+  new (): StateWithId<T>;
+}
+
+export interface ComponentDefinition<T extends Record<string, unknown> = {}> {
+  /** Unique component name. */
+  name: string;
+
+  /** Default state values (merged for each new state). */
+  state: Partial<T>;
+
+  /** Custom state constructor (constructed object MUST have `__id`). */
+  stateConstructor: StateConstructor<T> | null;
+
+  /** Call order among systems (lower runs earlier). Defaults to 99. */
+  order: number;
+
+  /**
+   * If true, an entity can have multiple states for this component.
+   * Affects the return type of `getState` / `getStateAccessor`.
+   */
+  multi: boolean;
+
+  /** Called after a state is added. */
+  onAdd: ((id: EntityId, state: StateWithId<T>) => void) | null;
+
+  /** Called before a state is removed. */
+  onRemove: ((id: EntityId, state: StateWithId<T>) => void) | null;
+
+  /**
+   * Per-tick logic. Receives `dt` and the component's states list
+   * (same shape as `getStatesList(compName)`).
+   */
+  system:
+    | ((dt: any, states: Array<StateWithId<T> | Array<StateWithId<T>>>) => void)
+    | null;
+
+  /**
+   * Per-render logic. Receives `dt` and the component's states list
+   * (same shape as `getStatesList(compName)`).
+   */
+  renderSystem:
+    | ((dt: any, states: Array<StateWithId<T> | Array<StateWithId<T>>>) => void)
+    | null;
+}
+
+export interface PartialComponentDefinition<
+  T extends Record<string, unknown> = {},
+> {
+  /** Unique component name. */
+  name: string;
+
+  /** Default state values (merged for each new state). */
+  state?: Partial<T>;
+
+  /** Custom state constructor (constructed object MUST have `__id`). */
+  stateConstructor?: StateConstructor<T>;
+
+  /** Call order among systems (lower runs earlier). Defaults to 99. */
+  order?: number;
+
+  /**
+   * If true, an entity can have multiple states for this component.
+   * Affects the return type of `getState` / `getStateAccessor`.
+   */
+  multi?: boolean;
+
+  /** Called after a state is added. */
+  onAdd?(id: EntityId, state: StateWithId<T>): void;
+
+  /** Called before a state is removed. */
+  onRemove?(id: EntityId, state: StateWithId<T>): void;
+
+  /**
+   * Per-tick logic. Receives `dt` and the component's states list
+   * (same shape as `getStatesList(compName)`).
+   */
+  system?(dt: any, states: Array<StateWithId<T> | Array<StateWithId<T>>>): void;
+
+  /**
+   * Per-render logic. Receives `dt` and the component's states list
+   * (same shape as `getStatesList(compName)`).
+   */
+  renderSystem?(
+    dt: any,
+    states: Array<StateWithId<T> | Array<StateWithId<T>>>,
+  ): void;
+}
 
 /**
  * Constructor for a new entity-component-system manager.
@@ -20,11 +104,10 @@ import DataStore from "./dataStore";
  * @exports ECS
  * @typicalname ecs
  */
+export default class ECS {
+  components: Record<EntityId, ComponentDefinition<any>>;
 
-class ECS {
-  components: any;
-  comps: any;
-  private storage: any;
+  private storage: Record<string, DataStore>;
   private systems: any[];
   private renderSystems: any[];
   private UID: number;
@@ -45,25 +128,15 @@ class ECS {
      * ```
      */
     this.components = {};
-    this.comps = this.components;
 
     /*
      *
      * 		internal properties:
      *
      */
-    var components = this.components;
 
     // counter for entity IDs
     this.UID = 1;
-
-    // Storage for all component state data:
-    // storage['component-name'] = DataStore instance
-    var storage = {};
-
-    // flat arrays of names of components with systems
-    var systems = [];
-    var renderSystems = [];
 
     // flags and arrays for deferred cleanup of removed stuff
     this.deferrals = {
@@ -71,19 +144,14 @@ class ECS {
       removals: [],
       multiComps: [],
     };
+    // Storage for all component state data:
+    // storage['component-name'] = DataStore instance
+    this.storage = {};
 
-    // expose references to internals for debugging or hacking
-    this.storage = storage;
-    this.systems = systems;
-    this.renderSystems = renderSystems;
+    // flat arrays of names of components with systems
+    this.systems = [];
 
-    /*
-     *
-     *
-     * 				Public API
-     *
-     *
-     */
+    this.renderSystems = [];
   }
   /**
    * Creates a new entity id (currently just an incrementing integer).
@@ -95,28 +163,9 @@ class ECS {
    * var id2 = ecs.createEntity([ 'some-component', 'other-component' ])
    * ```
    */
-  createEntity(compList) {
+  createEntity(compList: any[]): EntityId {
     var id = this.UID++;
-    if (Array.isArray(compList)) {
-      compList.forEach((compName) => this.addComponent(id, compName));
-    }
-    return id;
-  }
-  /**
-   * Creates a new entity id (currently just an incrementing integer).
-   *
-   * Optionally takes a list of component names to add to the entity (with default state data).
-   *
-   * ```js
-   * var id1 = ecs.createEntity()
-   * var id2 = ecs.createEntity([ 'some-component', 'other-component' ])
-   * ```
-   */
-  createEntity(compList) {
-    var id = this.UID++;
-    if (Array.isArray(compList)) {
-      compList.forEach((compName) => this.addComponent(id, compName));
-    }
+    compList.forEach((compName) => this.addComponent(id, compName));
     return id;
   }
   /**
@@ -126,7 +175,7 @@ class ECS {
    * ecs.deleteEntity(id)
    * ```
    */
-  deleteEntity(entID) {
+  deleteEntity(entID: EntityId) {
     // loop over all components and maybe remove them
     // this avoids needing to keep a list of components-per-entity
     Object.keys(this.storage).forEach((compName) => {
@@ -165,49 +214,37 @@ class ECS {
    * For multi-components, APIs that would normally return a state object
    * (like `getState`) will instead return an array of them.
    */
-  createComponent(compDefn) {
+  createComponent<T extends Record<string, unknown>>(
+    compDefn: PartialComponentDefinition<T>,
+  ) {
     if (!compDefn) throw new Error("Missing component definition");
-    var name = compDefn.name;
-    if (!name)
-      throw new Error("Component definition must have a name property.");
-    if (typeof name !== "string")
-      throw new Error("Component name must be a string.");
-    if (name === "")
-      throw new Error("Component name must be a non-empty string.");
-    if (this.storage[name])
+
+    if (this.storage[compDefn.name])
       throw new Error(`Component ${name} already exists.`);
 
     // rebuild definition object for monomorphism
-    var internalDef = {};
-    internalDef.name = name;
-    internalDef.multi = !!compDefn.multi;
-    internalDef.order = isNaN(compDefn.order) ? 99 : compDefn.order;
-    internalDef.stateConstructor = compDefn.stateConstructor || null;
-    internalDef.state = compDefn.state || {};
-    internalDef.onAdd = compDefn.onAdd || null;
-    internalDef.onRemove = compDefn.onRemove || null;
-    internalDef.system = compDefn.system || null;
-    internalDef.renderSystem = compDefn.renderSystem || null;
-
-    this.components[name] = internalDef;
-    this.storage[name] = new DataStore();
-    this.storage[name]._pendingMultiCleanup = false;
-    this.storage[name]._multiCleanupIDs = internalDef.multi ? [] : null;
+    const internalDef = this.convertCompDefnToFull(compDefn);
+    this.components[compDefn.name] = internalDef;
+    this.storage[compDefn.name] = new DataStore();
+    this.storage[compDefn.name]._pendingMultiCleanup = false;
+    this.storage[compDefn.name]._multiCleanupIDs = internalDef.multi
+      ? []
+      : null;
 
     if (internalDef.system) {
-      this.systems.push(name);
+      this.systems.push(compDefn.name);
       this.systems.sort(
         (a, b) => this.components[a].order - this.components[b].order,
       );
     }
     if (internalDef.renderSystem) {
-      this.renderSystems.push(name);
+      this.renderSystems.push(compDefn.name);
       this.renderSystems.sort(
         (a, b) => this.components[a].order - this.components[b].order,
       );
     }
 
-    return name;
+    return compDefn.name;
   }
   /**
    * Overwrites an existing component with a new definition object, which
@@ -230,7 +267,10 @@ class ECS {
    * ```
    *
    */
-  overwriteComponent(compName, compDefn) {
+  overwriteComponent<T extends Record<string, unknown>>(
+    compName: string,
+    compDefn: PartialComponentDefinition<T>,
+  ) {
     var def = this.components[compName];
     if (!def) throw new Error(`Unknown component: ${compName}`);
     if (!compDefn) throw new Error("Missing component definition");
@@ -238,15 +278,7 @@ class ECS {
       throw new Error("Overwriting component must use the same name property.");
 
     // rebuild definition object for monomorphism
-    var internalDef = {};
-    internalDef.name = compName;
-    internalDef.multi = !!compDefn.multi;
-    internalDef.order = isNaN(compDefn.order) ? 99 : compDefn.order;
-    internalDef.state = compDefn.state || {};
-    internalDef.onAdd = compDefn.onAdd || null;
-    internalDef.onRemove = compDefn.onRemove || null;
-    internalDef.system = compDefn.system || null;
-    internalDef.renderSystem = compDefn.renderSystem || null;
+    var internalDef = this.convertCompDefnToFull(compDefn);
 
     // overwrite internal references to old component def
     this.components[compName] = internalDef;
@@ -271,8 +303,8 @@ class ECS {
     // add any default state properties they're missing
     var baseState = internalDef.state;
     this.getStatesList(compName).forEach((state) => {
-      for (var key in baseState) {
-        if (!(key in state)) state[key] = baseState[key];
+      for (const key of Object.keys(baseState)) {
+        if (!(key in state)) (state as any)[key] = baseState[key];
       }
       // also call the new comp's add handler, if any
       if (internalDef.onAdd) internalDef.onAdd(state.__id, state);
@@ -293,7 +325,7 @@ class ECS {
    * ecs.deleteComponent( 'some-component' )
    * ```
    */
-  deleteComponent(compName) {
+  deleteComponent(compName: string) {
     var data = this.storage[compName];
     if (!data) throw new Error(`Unknown component: ${compName}`);
 
@@ -327,7 +359,11 @@ class ECS {
    * ecs.addComponent(id2, 'foo', { val:2 })  // pass in state data
    * ```
    */
-  addComponent(entID, compName, state) {
+  addComponent(
+    entID: EntityId,
+    compName: string,
+    state: Record<string, unknown> = {},
+  ) {
     var def = this.components[compName];
     var data = this.storage[compName];
     if (!data) throw new Error(`Unknown component: ${compName}.`);
@@ -338,17 +374,9 @@ class ECS {
     }
 
     // create new component state object for this entity
-    var newState;
-    if (def.stateConstructor) {
-      newState = new def.stateConstructor();
-      if (!newState.hasOwnProperty("__id")) {
-        throw new Error(
-          `Component ${def.name} stateConstructor type does not have property __id`,
-        );
-      }
-    } else {
-      newState = Object.assign({}, { __id: entID }, def.state, state);
-    }
+    var newState = def.stateConstructor
+      ? new def.stateConstructor()
+      : Object.assign({}, { __id: entID }, def.state, state);
 
     newState.__id = entID;
 
@@ -377,7 +405,7 @@ class ECS {
    * ecs.hasComponent(id, 'foo')       // true
    * ```
    */
-  hasComponent(entID, compName) {
+  hasComponent(entID: EntityId, compName: ComponentName) {
     var data = this.storage[compName];
     if (!data) throw new Error(`Unknown component: ${compName}.`);
     return !!data.hash[entID];
@@ -391,7 +419,7 @@ class ECS {
    * ecs.hasComponent(id, 'foo')     	 // false
    * ```
    */
-  removeComponent(entID, compName) {
+  removeComponent(entID: EntityId, compName: ComponentName) {
     var data = this.storage[compName];
     if (!data) throw new Error(`Unknown component: ${compName}.`);
 
@@ -414,7 +442,7 @@ class ECS {
    * ecs.getState(id, 'foo').__id      // equals id
    * ```
    */
-  getState(entID, compName) {
+  getState(entID: EntityId, compName: ComponentName) {
     var data = this.storage[compName];
     if (!data) throw new Error(`Unknown component: ${compName}.`);
     return data.hash[entID];
@@ -433,10 +461,12 @@ class ECS {
    * //   ]
    * ```
    */
-  getStatesList(compName) {
+  getStatesList(
+    compName: ComponentName,
+  ): (StateWithId<unknown> | StateWithId<unknown>[])[] {
     var data = this.storage[compName];
     if (!data) throw new Error(`Unknown component: ${compName}.`);
-    this.doDeferredCleanup(data);
+    this.doDeferredCleanup();
     return data.list;
   }
   /**
@@ -455,7 +485,7 @@ class ECS {
    * getEntitySize(id).val      // 123
    * ```
    */
-  getStateAccessor(compName) {
+  getStateAccessor(compName: string) {
     if (!this.storage[compName])
       throw new Error(`Unknown component: ${compName}.`);
     var hash = this.storage[compName].hash;
@@ -475,11 +505,11 @@ class ECS {
    * hasFoo(id) // true
    * ```
    */
-  getComponentAccessor(compName) {
+  getComponentAccessor(compName: string) {
     if (!this.storage[compName])
       throw new Error(`Unknown component: ${compName}.`);
     var hash = this.storage[compName].hash;
-    return (id) => !!hash[id];
+    return (id) => Boolean(hash[id]);
   }
   /**
    * Tells the ECS that a game tick has occurred, causing component
@@ -504,16 +534,15 @@ class ECS {
    * ecs.tick(30) // triggers log statements
    * ```
    */
-  tick(dt) {
+  tick(dt: number) {
     this.doDeferredCleanup();
-    for (var i = 0; i < this.systems.length; i++) {
-      var compName = this.systems[i];
+    for (const compName of this.systems) {
       var comp = this.components[compName];
       var data = this.storage[compName];
-      comp.system(dt, data.list);
+      comp.system?.(dt, data.list);
       this.doDeferredCleanup();
     }
-    return self;
+    return this;
   }
   /**
    * Functions exactly like `tick`, but calls `renderSystem` functions.
@@ -533,16 +562,15 @@ class ECS {
    * ecs.render(1000/60)
    * ```
    */
-  render(dt) {
+  render(dt: number) {
     this.doDeferredCleanup();
-    for (var i = 0; i < this.renderSystems.length; i++) {
-      var compName = this.renderSystems[i];
+    for (const compName of this.renderSystems) {
       var comp = this.components[compName];
       var data = this.storage[compName];
-      comp.renderSystem(dt, data.list);
+      comp.renderSystem?.(dt, data.list);
       this.doDeferredCleanup();
     }
-    return self;
+    return this;
   }
   /**
    * Removes one particular instance of a multi-component.
@@ -559,7 +587,11 @@ class ECS {
    * ecs.getState(id, 'foo')   // [ state1, state3 ]
    * ```
    */
-  removeMultiComponent(entID, compName, index) {
+  removeMultiComponent(
+    entID: EntityId,
+    compName: ComponentName,
+    index: number,
+  ) {
     var def = this.components[compName];
     var data = this.storage[compName];
     if (!data) throw new Error(`Unknown component: ${compName}.`);
@@ -580,7 +612,7 @@ class ECS {
    *
    */
   // remove given component from an entity
-  private internalRemoveComponent(entID, compName) {
+  private internalRemoveComponent(entID: EntityId, compName: ComponentName) {
     var def = this.components[compName];
     var data = this.storage[compName];
 
@@ -593,14 +625,15 @@ class ECS {
     data.remove(entID);
 
     // call onRemove handler - on each instance for multi components
-    if (def.onRemove) {
+    const onRemove = def.onRemove;
+    if (onRemove) {
       if (def.multi) {
-        state.forEach((state) => {
-          if (state) def.onRemove(entID, state);
+        state.forEach((state: unknown) => {
+          if (state) onRemove(entID, state);
         });
         state.length = 0;
       } else {
-        def.onRemove(entID, state);
+        onRemove(entID, state);
       }
     }
 
@@ -608,7 +641,12 @@ class ECS {
     this.pingDeferrals();
   }
   // remove one state from a multi component
-  private removeMultiCompElement(entID, def, data, index) {
+  private removeMultiCompElement<T extends Record<string, unknown>>(
+    entID: EntityId,
+    def: ComponentDefinition<T>,
+    data: any,
+    index: number,
+  ) {
     // if statesArr isn't present there's no work or cleanup to do
     var statesArr = data.hash[entID];
     if (!statesArr) return;
@@ -654,12 +692,11 @@ class ECS {
   }
 
   // removes null elements from multi-comp state arrays
-  private deferredMultiCompCleanup(list) {
-    for (var i = 0; i < list.length; i++) {
-      var { entID, data } = list[i];
+  private deferredMultiCompCleanup(list: { entID: any; data: any }[]) {
+    for (const { entID, data } of list) {
       var statesArr = data.hash[entID];
       if (!statesArr) continue;
-      for (var j = 0; j < statesArr.length; j++) {
+      for (let j = 0; j < statesArr.length; j++) {
         if (statesArr[j]) continue;
         statesArr.splice(j, 1);
         j--;
@@ -674,11 +711,26 @@ class ECS {
   }
 
   // flushes dataStore after components have been removed
-  private deferredComponentCleanup(list) {
-    for (var i = 0; i < list.length; i++) {
-      var data = list[i];
+  private deferredComponentCleanup(list: any[]) {
+    for (const data of list) {
       data.flush();
     }
     list.length = 0;
+  }
+
+  private convertCompDefnToFull<T extends Record<string, unknown>>(
+    compDefn: PartialComponentDefinition<T>,
+  ): ComponentDefinition<T> {
+    return {
+      name: compDefn.name,
+      multi: compDefn.multi ?? false,
+      order: compDefn.order ?? 99,
+      stateConstructor: compDefn.stateConstructor ?? null,
+      state: compDefn.state ?? {},
+      onAdd: compDefn.onAdd ?? null,
+      onRemove: compDefn.onRemove ?? null,
+      system: compDefn.system ?? null,
+      renderSystem: compDefn.renderSystem ?? null,
+    };
   }
 }
